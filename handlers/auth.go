@@ -1,0 +1,167 @@
+package handlers
+
+import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+
+	"radiance/middleware"
+	"radiance/models"
+
+	"github.com/google/uuid"
+)
+
+type AuthHandler struct {
+	db        *sql.DB
+	jwtSecret string
+}
+
+func NewAuthHandler(db *sql.DB, jwtSecret string) *AuthHandler {
+	return &AuthHandler{db: db, jwtSecret: jwtSecret}
+}
+
+func hashPassword(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(hash[:])
+}
+
+func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+	var req models.AuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Email == "" || req.Password == "" {
+		http.Error(w, "Email and password required", http.StatusBadRequest)
+		return
+	}
+
+	userID := uuid.New().String()
+	passwordHash := hashPassword(req.Password)
+
+	_, err := h.db.Exec(
+		"INSERT INTO users (id, email, password_hash, status) VALUES ($1, $2, $3, $4)",
+		userID, req.Email, passwordHash, "offline",
+	)
+	if err != nil {
+		http.Error(w, "User already exists", http.StatusConflict)
+		return
+	}
+
+	token, err := middleware.GenerateToken(userID, h.jwtSecret)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	resp := models.AuthResponse{
+		Token: token,
+		User: &models.User{
+			ID:     userID,
+			Email:  req.Email,
+			Status: "offline",
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var req models.AuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	var user models.User
+	var passwordHash string
+	err := h.db.QueryRow(
+		"SELECT id, email, password_hash, status FROM users WHERE email = $1",
+		req.Email,
+	).Scan(&user.ID, &user.Email, &passwordHash, &user.Status)
+
+	if err == sql.ErrNoRows {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	if hashPassword(req.Password) != passwordHash {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := middleware.GenerateToken(user.ID, h.jwtSecret)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	resp := models.AuthResponse{
+		Token: token,
+		User:  &user,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	token, err := middleware.ExtractToken(authHeader)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	claims, err := middleware.VerifyToken(token, h.jwtSecret)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var user models.User
+	err = h.db.QueryRow(
+		"SELECT id, email, status FROM users WHERE id = $1",
+		claims.UserID,
+	).Scan(&user.ID, &user.Email, &user.Status)
+
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
+}
+
+func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		token, err := middleware.ExtractToken(authHeader)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		claims, err := middleware.VerifyToken(token, h.jwtSecret)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		r.Header.Set("X-User-ID", claims.UserID)
+		next.ServeHTTP(w, r)
+	})
+}
