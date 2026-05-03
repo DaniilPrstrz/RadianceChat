@@ -1,12 +1,8 @@
-const API_URL = (() => {
-    // При запуске фронта через nginx используем same-origin прокси (/api -> backend)
-    if (window.location.protocol.startsWith('http')) {
-        return `${window.location.origin}/api`;
-    }
+const API_URL = '/api';
 
-    // Fallback для локальной отладки без веб-сервера
-    return 'http://localhost:8080';
-})();
+if (!window.location.protocol.startsWith('http')) {
+    console.warn('Frontend должен запускаться через HTTP(S) сервер (например, nginx), иначе запросы к /api не будут работать.');
+}
 
 const loginBtn = document.getElementById('loginBtn');
 const registerBtn = document.getElementById('registerBtn');
