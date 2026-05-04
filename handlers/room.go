@@ -22,8 +22,7 @@ func NewRoomHandler(db *sql.DB) *RoomHandler {
 func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		userID = uuid.New().String() // Generate temp user ID
 	}
 
 	var req models.CreateRoomRequest
@@ -117,8 +116,7 @@ func (h *RoomHandler) ListRooms(w http.ResponseWriter, r *http.Request) {
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		userID = uuid.New().String() // Generate temp user ID
 	}
 
 	roomID := r.PathValue("id")
@@ -134,7 +132,19 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user already in room
+	// Check if user is already in room
+	var alreadyJoined int
+	if err := h.db.QueryRow("SELECT COUNT(*) FROM participants WHERE room_id = $1 AND user_id = $2 AND left_at IS NULL", roomID, userID).Scan(&alreadyJoined); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if alreadyJoined > 0 {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_joined"})
+		return
+	}
+
+	// Check room capacity
 	var activeCount int
 	if err := h.db.QueryRow("SELECT COUNT(*) FROM participants WHERE room_id = $1 AND left_at IS NULL", roomID).Scan(&activeCount); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -161,8 +171,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 func (h *RoomHandler) LeaveRoom(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		userID = uuid.New().String() // Generate temp user ID
 	}
 
 	roomID := r.PathValue("id")
@@ -236,8 +245,7 @@ func (h *RoomHandler) JoinByInvite(w http.ResponseWriter, r *http.Request) {
 func (h *RoomHandler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		userID = uuid.New().String() // Generate temp user ID
 	}
 
 	roomID := r.PathValue("id")

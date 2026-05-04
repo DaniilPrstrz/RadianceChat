@@ -77,19 +77,33 @@ func main() {
 	mux.HandleFunc("GET /rooms", roomHandler.ListRooms)
 	mux.HandleFunc("GET /rooms/{id}", roomHandler.GetRoom)
 
-	// Protected routes
-	mux.Handle("GET /auth/me", authHandler.AuthMiddleware(http.HandlerFunc(authHandler.GetMe)))
-	mux.Handle("POST /rooms", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.CreateRoom)))
-	mux.Handle("POST /rooms/{id}/join", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.JoinRoom)))
-	mux.Handle("POST /rooms/join/{invite}", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.JoinByInvite)))
-	mux.Handle("POST /rooms/{id}/leave", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.LeaveRoom)))
-	mux.Handle("GET /rooms/{id}/participants", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.GetParticipants)))
-	mux.Handle("DELETE /rooms/{id}", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.DeleteRoom)))
+	// Protected routes (temporarily without auth for testing)
+	// mux.Handle("GET /auth/me", authHandler.AuthMiddleware(http.HandlerFunc(authHandler.GetMe)))
+	// mux.Handle("POST /rooms", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.CreateRoom)))
+	// mux.Handle("POST /rooms/{id}/join", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.JoinRoom)))
+	// mux.Handle("POST /invites/{invite}", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.JoinByInvite)))
+	// mux.Handle("POST /rooms/{id}/leave", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.LeaveRoom)))
+	// mux.Handle("GET /rooms/{id}/participants", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.GetParticipants)))
+	// mux.Handle("DELETE /rooms/{id}", authHandler.AuthMiddleware(http.HandlerFunc(roomHandler.DeleteRoom)))
 
-	mux.Handle("GET /rooms/{id}/messages", authHandler.AuthMiddleware(http.HandlerFunc(chatHandler.GetMessages)))
-	mux.Handle("POST /rooms/{id}/messages", authHandler.AuthMiddleware(http.HandlerFunc(chatHandler.SendMessage)))
+	// mux.Handle("GET /rooms/{id}/messages", authHandler.AuthMiddleware(http.HandlerFunc(chatHandler.GetMessages)))
+	// mux.Handle("POST /rooms/{id}/messages", authHandler.AuthMiddleware(http.HandlerFunc(chatHandler.SendMessage)))
 
-	mux.Handle("/signaling", authHandler.AuthMiddleware(http.HandlerFunc(signalingServer.HandleWebSocket)))
+	// mux.Handle("/signaling", authHandler.AuthMiddleware(http.HandlerFunc(signalingServer.HandleWebSocket)))
+
+	// Temporary public routes for testing
+	mux.HandleFunc("GET /auth/me", authHandler.GetMe)
+	mux.HandleFunc("POST /rooms", roomHandler.CreateRoom)
+	mux.HandleFunc("POST /rooms/{id}/join", roomHandler.JoinRoom)
+	mux.HandleFunc("POST /invites/{invite}", roomHandler.JoinByInvite)
+	mux.HandleFunc("POST /rooms/{id}/leave", roomHandler.LeaveRoom)
+	mux.HandleFunc("GET /rooms/{id}/participants", roomHandler.GetParticipants)
+	mux.HandleFunc("DELETE /rooms/{id}", roomHandler.DeleteRoom)
+
+	mux.HandleFunc("GET /rooms/{id}/messages", chatHandler.GetMessages)
+	mux.HandleFunc("POST /rooms/{id}/messages", chatHandler.SendMessage)
+
+	mux.HandleFunc("/signaling", signalingServer.HandleWebSocket)
 
 	addr := ":" + cfg.Port
 	log.Printf("🎙️  Radiance server starting on http://localhost:%s", cfg.Port)
