@@ -4,10 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"time"
-	"fmt"
 	"radiance/models"
-
 	"github.com/google/uuid"
 )
 
@@ -20,55 +17,60 @@ func NewRoomHandler(db *sql.DB) *RoomHandler {
 }
 
 func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
-    userID := r.Header.Get("X-User-ID") 
-    
-    if userID == "" {
-        http.Error(w, "Unauthorized: User ID is required", http.StatusUnauthorized)
-        return
-    }
+	userID := r.Header.Get("X-User-ID")
+	if userID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-    var req models.CreateRoomRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, "Invalid request body", http.StatusBadRequest)
-        return
-    }
+	var req models.CreateRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 
-    roomID := uuid.New().String()
-    inviteLink := uuid.New().String()
+	roomID := uuid.New().String()
+	inviteLink := uuid.New().String()
 
-    _, err := h.db.Exec(
-        "INSERT INTO rooms (id, name, type, host_id, invite_link, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        roomID, req.Name, req.Type, userID, inviteLink, "active",
-    )
-    if err != nil {
-        fmt.Printf("DATABASE ERROR (Rooms): %v\n", err) 
-        http.Error(w, "Failed to create room in database", http.StatusInternalServerError)
-        return
-    }
+	// Используем транзакцию, чтобы создать комнату и сразу добавить в неё хоста
+	tx, err := h.db.Begin()
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
-    _, err = h.db.Exec(
-        "INSERT INTO participants (id, room_id, user_id, role) VALUES ($1, $2, $3, $4)",
-        uuid.New().String(), roomID, userID, "host",
-    )
-    if err != nil {
-        fmt.Printf("DATABASE ERROR (Participants): %v\n", err)
-        http.Error(w, "Failed to add host to participants", http.StatusInternalServerError)
-        return
-    }
+	// 1. Создаем комнату
+	_, err = tx.Exec(
+		"INSERT INTO rooms (id, name, type, host_id, invite_link, status) VALUES ($1, $2, $3, $4, $5, 'active')",
+		roomID, req.Name, req.Type, userID, inviteLink,
+	)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Database error (rooms)", http.StatusInternalServerError)
+		return
+	}
 
-    room := models.Room{
-        ID:         roomID,
-        Name:       req.Name,
-        Type:       req.Type,
-        HostID:     userID,
-        InviteLink: inviteLink,
-        CreatedAt:  time.Now(),
-        Status:     "active",
-    }
+	// 2. Добавляем хоста в участники (Participant)
+	_, err = tx.Exec(
+		"INSERT INTO participants (id, room_id, user_id, role) VALUES ($1, $2, $3, 'host')",
+		uuid.New().String(), roomID, userID,
+	)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Database error (participants)", http.StatusInternalServerError)
+		return
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(room)
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":          roomID,
+		"invite_link": inviteLink,
+	})
 }
 
 func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +104,7 @@ func (h *RoomHandler) ListRooms(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var rooms []models.Room
+	rooms := make([]models.Room, 0)
 	for rows.Next() {
 		var room models.Room
 		if err := rows.Scan(&room.ID, &room.Name, &room.Type, &room.HostID, &room.InviteLink, &room.CreatedAt, &room.Status); err != nil {
