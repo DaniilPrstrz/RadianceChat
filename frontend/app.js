@@ -1,4 +1,3 @@
-// app_11.js
 const API_URL = window.location.origin + '/api'; 
 const tokenKey = 'radiance_token';
 const userIdKey = 'radiance_user_id';
@@ -15,7 +14,12 @@ const getToken = () => localStorage.getItem(tokenKey);
 const setToken = (token) => localStorage.setItem(tokenKey, token);
 const setUserId = (id) => localStorage.setItem(userIdKey, id);
 
+
 const getEl = (id) => document.getElementById(id);
+const joinByInviteBtn = getEl('joinByInviteBtn');
+if (joinByInviteBtn) {
+    joinByInviteBtn.onclick = joinByCode;
+}
 
 const elements = {
     authScreen: getEl('authScreen'),
@@ -89,29 +93,86 @@ async function login() {
     }
 }
 
+async function register() {
+    const email = elements.regEmail?.value;
+    const password = elements.regPassword?.value;
+
+    if (!email || !password) {
+        return showAuthError('Введите email и пароль');
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password }) // Поля должны совпадать с моделями в Go
+        });
+
+        const data = await response.json();
+        if (response.ok) {
+            setToken(data.token);
+            setUserId(data.user.id);
+            currentUser = data.user;
+            showScreen('app');
+            await loadRooms();
+            showNotification('Регистрация успешна!');
+        } else {
+            showAuthError(data.error || 'Ошибка регистрации');
+        }
+    } catch (err) {
+        showAuthError('Сервер недоступен');
+    }
+}
+
+if (elements.registerBtn) elements.registerBtn.onclick = register;
+
 async function loadRooms() {
     try {
         const response = await fetch(`${API_URL}/rooms`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
+        
         if (!response.ok) return;
-
         const rooms = await response.json();
+        
         if (elements.roomsList) {
+            // Если комнат нет, показываем заглушку
+            if (rooms.length === 0) {
+                elements.roomsList.innerHTML = '<li class="empty-list">У вас пока нет активных комнат</li>';
+                return;
+            }
+
             elements.roomsList.innerHTML = rooms.map(room => `
-                <li class="room-item" data-id="${room.id}">
+                <li class="room-item" data-id="${room.id}" data-invite="${room.invite_link || ''}">
                     <div class="room-item-title">${room.name}</div>
+                    <div class="room-item-info">Код: ${room.invite_link}</div>
                 </li>
             `).join('');
 
             elements.roomsList.querySelectorAll('.room-item').forEach(item => {
-                item.onclick = () => joinRoom(item.getAttribute('data-id'));
+                item.onclick = () => {
+                    const roomId = item.getAttribute('data-id');
+                    window.currentRoomInvite = item.getAttribute('data-invite');
+                    
+                    // Визуально выделяем активную комнату
+                    elements.roomsList.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
+                    item.classList.add('active');
+                    
+                    joinRoom(roomId);
+                };
             });
         }
     } catch (err) { console.error("Ошибка загрузки комнат", err); }
 }
 
 async function joinRoom(roomId) {
+    await fetch(`${API_URL}/rooms/${roomId}/join`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
+
+    currentRoom = roomId;
+
     console.log(`Присоединение к комнате: ${roomId}`);
     currentRoom = roomId;
     
@@ -158,13 +219,21 @@ function connectSocket(token, roomId) {
     };
 
     socket.onmessage = async (event) => {
-        const data = JSON.parse(event.data);
-        switch (data.type) {
-            case 'offer': await handleOffer(data); break;
-            case 'answer': await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer)); break;
-            case 'candidate': 
-                if (peerConnection) await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate)); 
+        const msg = JSON.parse(event.data);
+        switch (msg.type) {
+            case 'offer': 
+                await handleOffer(msg); 
                 break;
+            case 'answer': 
+                if (peerConnection) {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.data));
+                }
+                break;
+            case 'candidate': 
+                if (peerConnection && msg.data) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(msg.data)); 
+                }
+               break;
         }
     };
 
@@ -189,9 +258,15 @@ async function createRoom() {
         });
 
         if (response.ok) {
+            const data = await response.json();
             elements.roomNameInput.value = '';
             await loadRooms();
-            showNotification('Комната создана');
+            
+            // Автоматическое копирование в буфер обмена
+            if (data.invite_link) {
+                await navigator.clipboard.writeText(data.invite_link);
+                showNotification(`Комната создана! Код ${data.invite_link} скопирован.`);
+            }
         }
     } catch (error) {
         showNotification('Ошибка сети', 'error');
@@ -244,6 +319,21 @@ async function toggleMic() {
     }
 }
 
+async function copyCurrentInvite() {
+    if (!window.currentRoomInvite) {
+        showNotification('Сначала выберите комнату', 'error');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(window.currentRoomInvite);
+        showNotification('Код приглашения скопирован!');
+    } catch (err) {
+        showNotification('Не удалось скопировать код', 'error');
+    }
+}
+
+getEl('copyInviteBtn')?.addEventListener('click', copyCurrentInvite);
+
 function leaveRoom() {
     if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
@@ -258,6 +348,33 @@ function leaveRoom() {
     elements.roomsList.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
     
     showNotification('Вы вышли из комнаты');
+}
+
+async function joinByCode() {
+    const code = prompt("Введите код приглашения:");
+    if (!code) return;
+
+    try {
+        const response = await fetch(`${API_URL}/invites/${code}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${getToken()}` }
+        });
+
+        if (response.ok) {
+            const data = await response.json(); // Предполагаем, что бэкенд вернет {room_id: "..."}
+            showNotification('Вы успешно вошли в комнату!');
+            
+            await loadRooms();
+            
+            if (data.room_id) {
+                joinRoom(data.room_id); 
+            }
+        } else {
+            showNotification('Неверный код или комната полна', 'error');
+        }
+    } catch (err) {
+        showNotification('Ошибка сервера', 'error');
+    }
 }
 
 if (elements.toggleMicBtn) elements.toggleMicBtn.onclick = toggleMic;
@@ -331,7 +448,6 @@ async function startCall() {
 
     peerConnection = new RTCPeerConnection(rtcConfig);
     
-    // Добавляем микрофон
     if (!localStream) {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     }
@@ -364,22 +480,46 @@ async function startCall() {
     socket.send(JSON.stringify({
         type: 'offer',
         room_id: currentRoom,
-        offer: offer
+        data: offer
     }));
 }
 
-async function handleOffer(data) {
+async function handleOffer(message) {
+    if (!message.data) return;
+
     peerConnection = new RTCPeerConnection(rtcConfig);
-    // ... (аналогичная настройка ontrack и onicecandidate) ...
-    
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+
+    // 1. Добавляем свой микрофон в соединение
+    if (!localStream) {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+    // 2. Настраиваем обработчики (такие же, как в startCall)
+    peerConnection.ontrack = (event) => {
+        const audio = new Audio();
+        audio.srcObject = event.streams[0];
+        audio.play();
+    };
+
+    peerConnection.onicecandidate = (event) => {
+        if (event.candidate && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'candidate',
+                room_id: currentRoom,
+                data: event.candidate // Используем поле 'data'
+            }));
+        }
+    };
+
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.data));
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
 
     socket.send(JSON.stringify({
         type: 'answer',
         room_id: currentRoom,
-        answer: answer
+        data: answer 
     }));
 }
 

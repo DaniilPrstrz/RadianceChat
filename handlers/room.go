@@ -95,9 +95,16 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RoomHandler) ListRooms(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(
-		"SELECT id, name, type, host_id, invite_link, created_at, status FROM rooms WHERE status = 'active' ORDER BY created_at DESC LIMIT 50",
-	)
+    userID := r.Header.Get("X-User-ID") // Получаем ID текущего пользователя
+
+    rows, err := h.db.Query(
+        `SELECT r.id, r.name, r.type, r.host_id, r.invite_link, r.created_at, r.status 
+         FROM rooms r
+         JOIN participants p ON r.id = p.room_id
+         WHERE r.status = 'active' AND p.user_id = $1 AND p.left_at IS NULL
+         ORDER BY r.created_at DESC`,
+        userID,
+    )
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
