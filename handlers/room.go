@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
-
+	"fmt"
 	"radiance/models"
 
 	"github.com/google/uuid"
@@ -20,52 +20,55 @@ func NewRoomHandler(db *sql.DB) *RoomHandler {
 }
 
 func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get("X-User-ID")
-	if userID == "" {
-		userID = uuid.New().String() // Generate temp user ID
-	}
+    userID := r.Header.Get("X-User-ID") 
+    
+    if userID == "" {
+        http.Error(w, "Unauthorized: User ID is required", http.StatusUnauthorized)
+        return
+    }
 
-	var req models.CreateRoomRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
+    var req models.CreateRoomRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
 
-	roomID := uuid.New().String()
-	inviteLink := uuid.New().String()
+    roomID := uuid.New().String()
+    inviteLink := uuid.New().String()
 
-	_, err := h.db.Exec(
-		"INSERT INTO rooms (id, name, type, host_id, invite_link, status) VALUES ($1, $2, $3, $4, $5, $6)",
-		roomID, req.Name, req.Type, userID, inviteLink, "active",
-	)
-	if err != nil {
-		http.Error(w, "Failed to create room", http.StatusInternalServerError)
-		return
-	}
+    _, err := h.db.Exec(
+        "INSERT INTO rooms (id, name, type, host_id, invite_link, status) VALUES ($1, $2, $3, $4, $5, $6)",
+        roomID, req.Name, req.Type, userID, inviteLink, "active",
+    )
+    if err != nil {
+        fmt.Printf("DATABASE ERROR (Rooms): %v\n", err) 
+        http.Error(w, "Failed to create room in database", http.StatusInternalServerError)
+        return
+    }
 
-	// Add host as participant
-	_, err = h.db.Exec(
-		"INSERT INTO participants (id, room_id, user_id, role) VALUES ($1, $2, $3, $4)",
-		uuid.New().String(), roomID, userID, "host",
-	)
-	if err != nil {
-		http.Error(w, "Failed to create room participant", http.StatusInternalServerError)
-		return
-	}
+    _, err = h.db.Exec(
+        "INSERT INTO participants (id, room_id, user_id, role) VALUES ($1, $2, $3, $4)",
+        uuid.New().String(), roomID, userID, "host",
+    )
+    if err != nil {
+        fmt.Printf("DATABASE ERROR (Participants): %v\n", err)
+        http.Error(w, "Failed to add host to participants", http.StatusInternalServerError)
+        return
+    }
 
-	room := models.Room{
-		ID:         roomID,
-		Name:       req.Name,
-		Type:       req.Type,
-		HostID:     userID,
-		InviteLink: inviteLink,
-		CreatedAt:  time.Now(),
-		Status:     "active",
-	}
+    room := models.Room{
+        ID:         roomID,
+        Name:       req.Name,
+        Type:       req.Type,
+        HostID:     userID,
+        InviteLink: inviteLink,
+        CreatedAt:  time.Now(),
+        Status:     "active",
+    }
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(room)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(room)
 }
 
 func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {

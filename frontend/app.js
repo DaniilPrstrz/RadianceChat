@@ -1,24 +1,23 @@
 const API_URL = '/api';
 const tokenKey = 'radiance_token';
+const userIdKey = 'radiance_user_id';
 let currentRoom = null;
 let currentUser = null;
 let autoRefreshInterval = null;
 
-// WebRTC
+
 let localStream = null;
 let signalingWS = null;
 let peerConnections = new Map();
 let incomingCall = null;
 let isAudioEnabled = true;
 
-// STUN servers for NAT traversal
 const iceServers = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' }
 ];
 
-// DOM Elements
 const authScreen = document.getElementById('authScreen');
 const appScreen = document.getElementById('appScreen');
 const loginForm = document.getElementById('loginForm');
@@ -63,7 +62,7 @@ const activeCallUI = document.getElementById('activeCallUI');
 const endCallBtn = document.getElementById('endCallBtn');
 const participantsGrid = document.getElementById('participantsGrid');
 
-// Event Listeners - Auth
+
 loginBtn.addEventListener('click', () => login());
 registerBtn.addEventListener('click', () => register());
 switchToRegister.addEventListener('click', (e) => {
@@ -79,7 +78,7 @@ switchToLogin.addEventListener('click', (e) => {
   authError.classList.add('hidden');
 });
 
-// Event Listeners - App
+
 logoutBtn.addEventListener('click', logout);
 createRoomBtn.addEventListener('click', createRoom);
 refreshRoomsBtn.addEventListener('click', refreshRooms);
@@ -100,107 +99,106 @@ messageInput.addEventListener('keypress', (e) => {
   }
 });
 
-// API Request
+
 async function request(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    const token = getToken();
+    const userID = localStorage.getItem(userIdKey);
 
-  try {
-    const res = await fetch(`${API_URL}${path}`, { ...options, headers });
-    const text = await res.text();
-    let data = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (userID) headers['X-User-ID'] = userID;
+
     try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { error: text || 'Invalid response' };
-    }
+        const res = await fetch(`${API_URL}${path}`, { ...options, headers });
+        const text = await res.text();
+        let data = {};
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            data = { error: text || 'Invalid response' };
+        }
 
-    if (!res.ok) {
-      const error = data.error || `HTTP ${res.status}`;
-      throw new Error(error);
+        if (!res.ok) {
+            const error = data.error || `HTTP ${res.status}`;
+            throw new Error(error);
+        }
+        return data;
+    } catch (error) {
+        throw error;
     }
-    return data;
-  } catch (error) {
-    throw error;
-  }
 }
 
-// Auth Functions
-function getToken() {
-  return localStorage.getItem(tokenKey);
-}
 
-function setToken(token) {
-  localStorage.setItem(tokenKey, token);
+function getToken() { return localStorage.getItem(tokenKey); }
+function setToken(token) { localStorage.setItem(tokenKey, token); }
+
+function setUserSession(token, userId) {
+    localStorage.setItem(tokenKey, token);
+    localStorage.setItem(userIdKey, userId);
 }
 
 function clearToken() {
-  localStorage.removeItem(tokenKey);
+    localStorage.removeItem(tokenKey);
+    localStorage.removeItem(userIdKey);
 }
-
 async function login() {
-  const email = loginEmail.value.trim();
-  const password = loginPassword.value;
+    const email = loginEmail.value.trim();
+    const password = loginPassword.value;
 
-  if (!email || !password) {
-    showAuthError('Введите email и пароль');
-    return;
-  }
+    if (!email || !password) {
+        showAuthError('Введите email и пароль');
+        return;
+    }
 
-  try {
-    const data = await request('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password })
-    });
+    try {
+        const data = await request('/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ email, password })
+        });
 
-    setToken(data.token);
-    currentUser = { email };
-    loginEmail.value = '';
-    loginPassword.value = '';
-    showScreen('app');
-    await loadRooms();
-  } catch (error) {
-    showAuthError(error.message);
-  }
+        setUserSession(data.token, data.id || data.userID); 
+        currentUser = { email, id: data.id };
+        
+        loginEmail.value = '';
+        loginPassword.value = '';
+        showScreen('app');
+        await loadRooms();
+    } catch (error) {
+        showAuthError(error.message);
+    }
 }
 
 async function register() {
-  const email = regEmail.value.trim();
-  const password = regPassword.value;
-  const confirmPassword = regPasswordConfirm.value;
+    const email = regEmail.value.trim();
+    const password = regPassword.value;
+    const confirmPassword = regPasswordConfirm.value;
 
-  if (!email || !password || !confirmPassword) {
-    showAuthError('Заполните все поля');
-    return;
-  }
+    if (!email || !password || !confirmPassword) {
+        showAuthError('Заполните все поля');
+        return;
+    }
+    if (password !== confirmPassword) {
+        showAuthError('Пароли не совпадают');
+        return;
+    }
 
-  if (password !== confirmPassword) {
-    showAuthError('Пароли не совпадают');
-    return;
-  }
+    try {
+        const data = await request('/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({ email, password })
+        });
 
-  if (password.length < 6) {
-    showAuthError('Пароль должен быть минимум 6 символов');
-    return;
-  }
+        setUserSession(data.token, data.id || data.userID);
+        currentUser = { email, id: data.id };
 
-  try {
-    const data = await request('/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ email, password })
-    });
-
-    setToken(data.token);
-    currentUser = { email };
-    regEmail.value = '';
-    regPassword.value = '';
-    regPasswordConfirm.value = '';
-    showScreen('app');
-    await loadRooms();
-  } catch (error) {
-    showAuthError(error.message);
-  }
+        regEmail.value = '';
+        regPassword.value = '';
+        regPasswordConfirm.value = '';
+        showScreen('app');
+        await loadRooms();
+    } catch (error) {
+        showAuthError(error.message);
+    }
 }
 
 function logout() {
@@ -217,7 +215,6 @@ function logout() {
   roomsList.innerHTML = '';
 }
 
-// Room Functions
 async function loadRooms() {
   try {
     const rooms = await request('/rooms');
@@ -258,29 +255,32 @@ async function refreshRooms() {
 }
 
 async function createRoom() {
-  const name = roomNameInput.value.trim();
+    const roomName = document.getElementById('roomName').value;
+    const roomType = document.getElementById('roomType').value;
+    
+    const userID = localStorage.getItem('user_id'); 
+    const token = localStorage.getItem('auth_token');
 
-  if (!name) {
-    showNotification('Введите название комнаты', 'error');
-    return;
-  }
+    if (!userID || !token) {
+        alert("Вы не авторизованы!");
+        return;
+    }
 
-  try {
-    createRoomBtn.disabled = true;
-    const room = await request('/rooms', {
-      method: 'POST',
-      body: JSON.stringify({ name, type: 'public' })
+    const response = await fetch('/api/rooms', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+            'X-User-ID': userID        },
+        body: JSON.stringify({ name: roomName, type: roomType })
     });
 
-    roomNameInput.value = '';
-    await joinRoom(room.id);
-    await loadRooms();
-    showNotification('Комната создана');
-  } catch (error) {
-    showNotification(error.message, 'error');
-  } finally {
-    createRoomBtn.disabled = false;
-  }
+    if (response.ok) {
+        // Обновить список комнат
+    } else {
+        const errorData = await response.text();
+        console.error("Ошибка сервера:", errorData);
+    }
 }
 
 async function joinRoom(roomID) {
@@ -364,7 +364,6 @@ function copyInviteToClipboard() {
   });
 }
 
-// Message Functions
 async function loadMessages() {
   if (!currentRoom) return;
 
@@ -429,7 +428,6 @@ async function sendMessage() {
   }
 }
 
-// WebRTC Functions
 async function initializeSignaling() {
   if (!currentRoom || !currentUser) return;
 
@@ -747,7 +745,7 @@ function endCall() {
   participantsGrid.innerHTML = '';
 }
 
-// UI Functions
+
 function showScreen(screen) {
   authScreen.classList.toggle('active', screen === 'auth');
   appScreen.classList.toggle('active', screen === 'app');
@@ -813,22 +811,23 @@ function startAutoRefresh() {
   }, 3000);
 }
 
-// Initialize
+
 async function init() {
-  const token = getToken();
-  if (token) {
-    try {
-      showScreen('app');
-      currentUser = { email: 'User' };
-      updateChatUI();
-      await loadRooms();
-    } catch (error) {
-      clearToken();
-      showScreen('auth');
+    const token = getToken();
+    const userID = localStorage.getItem(userIdKey);
+    if (token && userID) {
+        try {
+            showScreen('app');
+            currentUser = { email: 'User', id: userID };
+            updateChatUI();
+            await loadRooms();
+        } catch (error) {
+            clearToken();
+            showScreen('auth');
+        }
+    } else {
+        showScreen('auth');
     }
-  } else {
-    showScreen('auth');
-  }
 }
 
 init();
