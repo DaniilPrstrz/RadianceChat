@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"radiance/middleware"
 	"sync"
 
 	"github.com/google/uuid"
@@ -26,15 +27,16 @@ type Room struct {
 }
 
 type Peer struct {
-	ID     string
-	UserID string
-	Conn   *websocket.Conn
-	Send   chan *Message
-	RoomID string
+	ID       string
+	UserID   string
+	Username string
+	Conn     *websocket.Conn
+	Send     chan *Message
+	RoomID   string
 }
 
 type Message struct {
-	Type   string      `json:"type"` // offer, answer, candidate, join, leave
+	Type   string      `json:"type"` // offer, answer, candidate, join, leave, room_state
 	From   string      `json:"from"`
 	To     string      `json:"to,omitempty"`
 	RoomID string      `json:"room_id,omitempty"`
@@ -75,77 +77,89 @@ func (s *SignalingServer) getOrCreateRoom(roomID string) *Room {
 }
 
 func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-    token := r.URL.Query().Get("token")
-    roomID := r.PathValue("room")
-    userID := r.URL.Query().Get("user_id")
+	token := r.URL.Query().Get("token")
+	roomID := r.PathValue("room")
+	userID := r.URL.Query().Get("user_id")
+	username := r.URL.Query().Get("username")
 
-    // ИСПОЛЬЗУЕМ token: Простая проверка на наличие
-    if token == "" {
-        log.Printf("Rejecting connection: No token provided for room %s", roomID)
-        http.Error(w, "Unauthorized", http.StatusUnauthorized)
-        return
-    }
+	// Validate JWT token
+	if token == "" {
+		log.Printf("Rejecting connection: No token provided for room %s", roomID)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-    username := r.URL.Query().Get("username")
-    if username == "" {
-        username = "Участник"
-    }
+	// Verify token and extract user ID
+	claims, err := middleware.VerifyToken(token, s.jwtSecret)
+	if err != nil {
+		log.Printf("Rejecting connection: Invalid token for room %s: %v", roomID, err)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-    // ... (код проверки token и roomID остается прежним) ...
+	// Use the user ID from the validated token
+	userID = claims.UserID
 
-    conn, err := s.upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        log.Printf("WebSocket upgrade failed: %v", err)
-        return
-    }
+	if username == "" {
+		username = "Участник"
+	}
 
-    room := s.getOrCreateRoom(roomID)
-    peerID := uuid.New().String()
+	// Upgrade to WebSocket
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade failed: %v", err)
+		return
+	}
 
-    peer := &Peer{
-        ID:     peerID,
-        UserID: userID,
-        Conn:   conn,
-        Send:   make(chan *Message, 5),
-        RoomID: roomID,
-    }
+	room := s.getOrCreateRoom(roomID)
+	peerID := uuid.New().String()
 
-    // 2. Формируем список участников для нового пользователя
-    room.PeersMu.RLock()
-    var participants []map[string]string
-    for id := range room.Peers {
-        participants = append(participants, map[string]string{
-            "id":       id,
-            "username": "Участник", 
-        })
-    }
-    room.PeersMu.RUnlock()
+	peer := &Peer{
+		ID:       peerID,
+		UserID:   userID,
+		Username: username,
+		Conn:     conn,
+		Send:     make(chan *Message, 5),
+		RoomID:   roomID,
+	}
 
-    // 3. Регистрируем пира
-    room.PeersMu.Lock()
-    room.Peers[peerID] = peer
-    room.PeersMu.Unlock()
+	// Build list of existing participants for new user
+	room.PeersMu.RLock()
+	var participants []map[string]string
+	for id, p := range room.Peers {
+		participants = append(participants, map[string]string{
+			"id":       id,
+			"userId":   p.UserID,
+			"username": p.Username,
+		})
+	}
+	room.PeersMu.RUnlock()
 
-    // 4. Отправляем состояние комнаты новому пользователю
-    peer.Send <- &Message{
-        Type: "room_state",
-        Data: map[string]interface{}{
-            "participants": participants,
-        },
-    }
+	// Register peer
+	room.PeersMu.Lock()
+	room.Peers[peerID] = peer
+	room.PeersMu.Unlock()
 
-    // 5. Уведомляем остальных (теперь 'username' определен выше)
-    room.Broadcast <- &Message{
-        Type:   "user_joined",
-        From:   peerID,
-        Data:   map[string]string{"userId": peerID, "username": username},
-        RoomID: roomID,
-    }
+	// Send room state to new user
+	peer.Send <- &Message{
+		Type: "room_state",
+		Data: map[string]interface{}{
+			"participants": participants,
+		},
+	}
 
-    log.Printf("User %s connected to room %s as peer %s", userID, roomID, peerID)
+	// Notify others about new user
+	room.Broadcast <- &Message{
+		Type:   "user_joined",
+		From:   peerID,
+		Data:   map[string]string{"userId": userID, "username": username},
+		RoomID: roomID,
+	}
 
-    go s.handlePeer(peer, room)
-    go s.writePump(peer)
+	log.Printf("User %s (peer %s) connected to room %s", userID, peerID, roomID)
+
+	go s.handlePeer(peer, room)
+	go s.writePump(peer)
 }
 
 func (s *SignalingServer) handlePeer(peer *Peer, room *Room) {
@@ -155,12 +169,13 @@ func (s *SignalingServer) handlePeer(peer *Peer, room *Room) {
 		room.PeersMu.Unlock()
 
 		room.Broadcast <- &Message{
-			Type:   "leave",
+			Type:   "user_left",
 			From:   peer.ID,
+			Data:   map[string]string{"userId": peer.UserID, "username": peer.Username},
 			RoomID: room.ID,
 		}
 		peer.Conn.Close()
-		log.Printf("Peer %s disconnected from room %s", peer.ID, room.ID)
+		log.Printf("Peer %s (user %s) disconnected from room %s", peer.ID, peer.UserID, room.ID)
 	}()
 
 	for {
@@ -172,10 +187,11 @@ func (s *SignalingServer) handlePeer(peer *Peer, room *Room) {
 			break
 		}
 
+		// Set the from field to the peer's ID
 		msg.From = peer.ID
 		msg.RoomID = room.ID
 
-		// Если указан конкретный получатель (To), шлем ему. Иначе — всем в комнате.
+		// If a specific recipient is specified, send only to them
 		if msg.To != "" {
 			room.PeersMu.RLock()
 			if target, exists := room.Peers[msg.To]; exists {
@@ -183,6 +199,7 @@ func (s *SignalingServer) handlePeer(peer *Peer, room *Room) {
 			}
 			room.PeersMu.RUnlock()
 		} else {
+			// Broadcast to all peers in the room
 			room.Broadcast <- &msg
 		}
 	}
@@ -192,7 +209,7 @@ func (s *SignalingServer) broadcastLoop(room *Room) {
 	for msg := range room.Broadcast {
 		room.PeersMu.RLock()
 		for _, peer := range room.Peers {
-			// Не шлем сообщение самому себе
+			// Don't send message to sender
 			if peer.ID != msg.From {
 				select {
 				case peer.Send <- msg:
@@ -210,6 +227,7 @@ func (s *SignalingServer) writePump(peer *Peer) {
 
 	for msg := range peer.Send {
 		if err := peer.Conn.WriteJSON(msg); err != nil {
+			log.Printf("Error writing to peer %s: %v", peer.ID, err)
 			return
 		}
 	}

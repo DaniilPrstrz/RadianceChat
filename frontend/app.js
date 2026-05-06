@@ -1,598 +1,1015 @@
-const API_URL = window.location.origin + '/api'; 
+const API_URL = window.location.origin + '/api';
 const tokenKey = 'radiance_token';
 const userIdKey = 'radiance_user_id';
 
+// State management
 let currentRoom = null;
 let currentUser = null;
 let localStream = null;
-let isMicOn = false;
 let socket = null;
-let peerConnection = null;
-let activeParticipants = new Map();
+let peerConnections = new Map(); // Map of peerID -> RTCPeerConnection
+let activeParticipants = new Map(); // Map of peerID -> {username, userId}
+let isCallActive = false;
+let isMicOn = false;
+let isVideoOn = false;
 
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+};
+
+// Utility functions
 const getToken = () => localStorage.getItem(tokenKey);
 const setToken = (token) => localStorage.setItem(tokenKey, token);
 const setUserId = (id) => localStorage.setItem(userIdKey, id);
-
-const micBtn = document.getElementById('toggleMicBtn') || document.getElementById('toggleAudioBtn');
-const videoBtn = document.getElementById('toggleVideoBtn');
+const getUserId = () => localStorage.getItem(userIdKey);
 const getEl = (id) => document.getElementById(id);
-const joinByInviteBtn = getEl('joinByInviteBtn');
-if (joinByInviteBtn) {
-    joinByInviteBtn.onclick = joinByCode;
-}
 
-const elements = {
-    authScreen: getEl('authScreen'),
-    appScreen: getEl('appScreen'),
-    loginForm: getEl('loginForm'),
-    registerForm: getEl('registerForm'),
-    loginEmail: getEl('loginEmail'),
-    loginPassword: getEl('loginPassword'),
-    regEmail: getEl('regEmail'),
-    regPassword: getEl('regPassword'),
-    loginBtn: getEl('loginBtn'),
-    registerBtn: getEl('registerBtn'),
-    roomNameInput: getEl('roomNameInput'),
-    createRoomBtn: getEl('createRoomBtn'),
-    roomsList: getEl('roomsList'),
-    messagesList: getEl('messagesList'),
-    messageInput: getEl('messageInput'),
-    sendMessageBtn: getEl('sendMessageBtn'),
-    logoutBtn: getEl('logoutBtn'),
-    authError: getEl('authError'),
-    notification: getEl('notifications'), 
-    toggleMicBtn: getEl('toggleMicBtn'),   
-    callBtn: getEl('callBtn'),
-    leaveRoomBtn: getEl('leaveRoomBtn')
-};
-
+// Screen management
 function showScreen(screenName) {
-    if (screenName === 'app') {
-        elements.authScreen?.classList.remove('active');
-        elements.appScreen?.classList.add('active');
-    } else {
-        elements.appScreen?.classList.remove('active');
-        elements.authScreen?.classList.add('active');
-    }
+  document.querySelectorAll('.screen').forEach(screen => {
+    screen.classList.remove('active');
+  });
+  
+  switch(screenName) {
+    case 'auth':
+      getEl('authScreen')?.classList.add('active');
+      break;
+    case 'rooms':
+      getEl('roomsScreen')?.classList.add('active');
+      break;
+    case 'chat':
+      getEl('chatScreen')?.classList.add('active');
+      break;
+  }
 }
 
 function showNotification(message, type = 'success') {
-    if (elements.notification) {
-        const note = document.createElement('div');
-        note.className = `notification ${type}`;
-        note.textContent = message;
-        elements.notification.appendChild(note);
-        setTimeout(() => note.remove(), 3000);
-    }
+  const notifications = getEl('notifications');
+  if (!notifications) return;
+  
+  const note = document.createElement('div');
+  note.className = `notification ${type}`;
+  note.textContent = message;
+  notifications.appendChild(note);
+  setTimeout(() => note.remove(), 3000);
 }
 
+function showAuthError(message) {
+  const errorEl = getEl('authError');
+  if (errorEl) {
+    errorEl.textContent = message;
+    errorEl.classList.remove('hidden');
+    setTimeout(() => errorEl.classList.add('hidden'), 5000);
+  }
+}
+
+// Authentication
 async function login() {
-    const email = elements.loginEmail?.value;
-    const password = elements.loginPassword?.value;
+  const email = getEl('loginEmail')?.value;
+  const password = getEl('loginPassword')?.value;
 
-    try {
-        const response = await fetch(`${API_URL}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password })
-        });
+  if (!email || !password) {
+    return showAuthError('Введите email и пароль');
+  }
 
-        const data = await response.json();
-        if (response.ok) {
-            setToken(data.token);
-            setUserId(data.user.id);
-            currentUser = data.user;
-            showScreen('app');
-            // УДАЛЕНО: connectSocket(data.token); - Нельзя подключаться без RoomID
-            await loadRooms();
-        } else {
-            showAuthError(data.error || 'Ошибка входа');
-        }
-    } catch (err) {
-        showAuthError('Сервер недоступен');
+  try {
+    const response = await fetch(`${API_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      setToken(data.token);
+      setUserId(data.user.id);
+      currentUser = data.user;
+      showScreen('rooms');
+      await loadRooms();
+      updateUserInfo();
+    } else {
+      showAuthError(data.error || 'Ошибка входа');
     }
+  } catch (err) {
+    showAuthError('Сервер недоступен');
+  }
 }
 
 async function register() {
-    const email = elements.regEmail?.value;
-    const password = elements.regPassword?.value;
+  const email = getEl('regEmail')?.value;
+  const password = getEl('regPassword')?.value;
+  const passwordConfirm = getEl('regPasswordConfirm')?.value;
 
-    if (!email || !password) {
-        return showAuthError('Введите email и пароль');
-    }
+  if (!email || !password) {
+    return showAuthError('Введите email и пароль');
+  }
 
-    try {
-        const response = await fetch(`${API_URL}/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password }) // Поля должны совпадать с моделями в Go
-        });
+  if (password !== passwordConfirm) {
+    return showAuthError('Пароли не совпадают');
+  }
 
-        const data = await response.json();
-        if (response.ok) {
-            setToken(data.token);
-            setUserId(data.user.id);
-            currentUser = data.user;
-            showScreen('app');
-            await loadRooms();
-            showNotification('Регистрация успешна!');
-        } else {
-            showAuthError(data.error || 'Ошибка регистрации');
-        }
-    } catch (err) {
-        showAuthError('Сервер недоступен');
-    }
-}
-
-if (elements.registerBtn) elements.registerBtn.onclick = register;
-
-async function loadRooms() {
-    try {
-        const response = await fetch(`${API_URL}/rooms`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-        
-        if (!response.ok) return;
-        const rooms = await response.json();
-        
-        if (elements.roomsList) {
-            // Если комнат нет, показываем заглушку
-            if (rooms.length === 0) {
-                elements.roomsList.innerHTML = '<li class="empty-list">У вас пока нет активных комнат</li>';
-                return;
-            }
-
-            elements.roomsList.innerHTML = rooms.map(room => `
-                <li class="room-item" data-id="${room.id}" data-invite="${room.invite_link || ''}">
-                    <div class="room-item-title">${room.name}</div>
-                    <div class="room-item-info">Код: ${room.invite_link}</div>
-                </li>
-            `).join('');
-
-            elements.roomsList.querySelectorAll('.room-item').forEach(item => {
-                item.onclick = () => {
-                    const roomId = item.getAttribute('data-id');
-                    window.currentRoomInvite = item.getAttribute('data-invite');
-                    
-                    // Визуально выделяем активную комнату
-                    elements.roomsList.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
-                    item.classList.add('active');
-                    
-                    joinRoom(roomId);
-                };
-            });
-        }
-    } catch (err) { console.error("Ошибка загрузки комнат", err); }
-}
-
-async function joinRoom(roomId) {
-    await fetch(`${API_URL}/rooms/${roomId}/join`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${getToken()}` }
+  try {
+    const response = await fetch(`${API_URL}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
     });
 
-    currentRoom = roomId;
-
-    console.log(`Присоединение к комнате: ${roomId}`);
-    currentRoom = roomId;
-    
-    if (elements.messagesList) elements.messagesList.innerHTML = '';
-
-    getEl('noChatSelected')?.classList.add('hidden');
-    getEl('chatContainer')?.classList.remove('hidden');
-    
-    try {
-        const response = await fetch(`${API_URL}/rooms/${roomId}/messages`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-        if (response.ok) {
-            const messages = await response.json();
-            if (messages && Array.isArray(messages)) {
-                messages.forEach(msg => appendMessage(msg));
-            }
-        }
-    } catch (err) {
-        console.error("Не удалось загрузить историю чата", err);
+    const data = await response.json();
+    if (response.ok) {
+      setToken(data.token);
+      setUserId(data.user.id);
+      currentUser = data.user;
+      showScreen('rooms');
+      await loadRooms();
+      updateUserInfo();
+      showNotification('Регистрация успешна!');
+    } else {
+      showAuthError(data.error || 'Ошибка регистрации');
     }
-
-    const token = getToken();
-    // ПРАВИЛЬНО: Подключаем сокет только здесь, передавая roomId
-    if (token && roomId) {
-        connectSocket(token, roomId);
-    }
-}
-
-async function connectSocket(token, roomId) {
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws/chat/${roomId}/?token=${token}&username=${encodeURIComponent(currentUser?.username || 'User')}`;
-    socket = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${roomId}/?token=${token}`);
-
-    socket.onopen = () => {
-        console.log("Connected to WebSocket");
-        showNotification("Соединение установлено");
-    };
-
-    socket.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
-        
-        switch (msg.type) {
-            case 'room_state':
-    		activeParticipants.clear();
-    		const parts = msg.data.participants || [];
-    		parts.forEach(p => activeParticipants.set(p.id, p.username));
-    		updateParticipantList();
-    		break;
-
-            case 'user_joined':
-                activeParticipants.set(msg.userId, msg.username);
-                updateParticipantList();
-                break;
-
-            case 'user_left':
-                activeParticipants.delete(msg.userId);
-                updateParticipantList();
-                removeRemoteVideo(msg.userId);
-                break;
-
-            case 'offer':
-                await handleOffer(msg);
-                break;
-
-            case 'answer':
-                if (peerConnection) {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.data));
-                }
-                break;
-
-            case 'candidate':
-                if (peerConnection && msg.data) {
-                    try {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(msg.data));
-                    } catch (e) {
-                        console.error("Error adding ice candidate", e);
-                    }
-                }
-                break;
-
-            case 'chat_message':
-                appendMessage(msg);
-                break;
-        }
-    };
-
-    socket.onclose = () => {
-        showNotification("Соединение потеряно", "error");
-        setTimeout(() => connectSocket(token, roomId), 3000); // Реконнект
-    };
-}
-async function createRoom() {
-    const name = elements.roomNameInput?.value.trim();
-    if (!name) return;
-
-    try {
-        const response = await fetch(`${API_URL}/rooms`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
-            body: JSON.stringify({ name, type: 'public' })
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            elements.roomNameInput.value = '';
-            await loadRooms();
-            
-            // Автоматическое копирование в буфер обмена
-            if (data.invite_link) {
-                await navigator.clipboard.writeText(data.invite_link);
-                showNotification(`Комната создана! Код ${data.invite_link} скопирован.`);
-            }
-        }
-    } catch (error) {
-        showNotification('Ошибка сети', 'error');
-    }
+  } catch (err) {
+    showAuthError('Сервер недоступен');
+  }
 }
 
 function logout() {
-    localStorage.clear();
-    location.reload();
+  cleanup();
+  localStorage.clear();
+  location.reload();
 }
 
-// --- ИНИЦИАЛИЗАЦИЯ И СОБЫТИЯ ---
-
-// Переключение между Входом и Регистрацией
-getEl('switchToRegister')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    elements.loginForm?.classList.add('hidden');
-    elements.registerForm?.classList.remove('hidden');
-});
-
-getEl('switchToLogin')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    elements.registerForm?.classList.add('hidden');
-    elements.loginForm?.classList.remove('hidden');
-});
-
-if (elements.loginBtn) elements.loginBtn.onclick = login;
-if (elements.createRoomBtn) elements.createRoomBtn.onclick = createRoom;
-if (elements.logoutBtn) elements.logoutBtn.onclick = logout;
-
-async function toggleMic() {
-    if (!localStream) return;
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        micBtn.classList.toggle('active', !audioTrack.enabled);
-        micBtn.querySelector('i').className = audioTrack.enabled ? 'fas fa-microphone' : 'fas fa-microphone-slash';
-    }
+function updateUserInfo() {
+  const userInfo = getEl('roomsUserInfo');
+  if (userInfo && currentUser) {
+    userInfo.textContent = currentUser.email || currentUser.username || 'Пользователь';
+  }
 }
 
-async function toggleVideo() {
-    if (!localStream) return;
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        videoBtn.classList.toggle('active', !videoTrack.enabled);
-        videoBtn.querySelector('i').className = videoTrack.enabled ? 'fas fa-video' : 'fas fa-video-slash';
-    }
-}
-
-async function copyCurrentInvite() {
-    if (!window.currentRoomInvite) {
-        showNotification('Сначала выберите комнату', 'error');
+// Room management
+async function loadRooms() {
+  try {
+    const response = await fetch(`${API_URL}/rooms`, {
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
+    
+    if (!response.ok) return;
+    const rooms = await response.json();
+    
+    const roomsList = getEl('roomsList');
+    const noRooms = getEl('noRooms');
+    const roomCount = getEl('roomCount');
+    
+    if (roomsList) {
+      if (rooms.length === 0) {
+        roomsList.innerHTML = '';
+        noRooms?.classList.remove('hidden');
+        if (roomCount) roomCount.textContent = '0 комнат';
         return;
+      }
+
+      noRooms?.classList.add('hidden');
+      if (roomCount) roomCount.textContent = `${rooms.length} комнат`;
+
+      roomsList.innerHTML = rooms.map(room => `
+        <div class="room-card" data-id="${room.id}" data-invite="${room.invite_link || ''}" data-name="${room.name}">
+          <div class="room-card-header">
+            <div class="room-card-title">${room.name}</div>
+            <div class="room-card-code">${room.invite_link}</div>
+          </div>
+          <div class="room-card-info">
+            Создана: ${new Date(room.created_at).toLocaleDateString('ru-RU')}
+          </div>
+          <div class="room-card-actions">
+            <button class="btn-primary join-room-btn">Войти</button>
+            <button class="btn-secondary copy-code-btn">Копировать код</button>
+          </div>
+        </div>
+      `).join('');
+
+      // Add event listeners
+      roomsList.querySelectorAll('.room-card').forEach(card => {
+        const joinBtn = card.querySelector('.join-room-btn');
+        const copyBtn = card.querySelector('.copy-code-btn');
+        
+        joinBtn?.addEventListener('click', () => {
+          const roomId = card.getAttribute('data-id');
+          enterRoom(roomId, card.getAttribute('data-name'), card.getAttribute('data-invite'));
+        });
+        
+        copyBtn?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const code = card.getAttribute('data-invite');
+          copyToClipboard(code);
+        });
+      });
     }
-    try {
-        await navigator.clipboard.writeText(window.currentRoomInvite);
-        showNotification('Код приглашения скопирован!');
-    } catch (err) {
-        showNotification('Не удалось скопировать код', 'error');
-    }
+  } catch (err) {
+    console.error("Ошибка загрузки комнат", err);
+    showNotification('Ошибка загрузки комнат', 'error');
+  }
 }
 
-getEl('copyInviteBtn')?.addEventListener('click', copyCurrentInvite);
+async function createRoom() {
+  const name = getEl('roomNameInput')?.value.trim();
+  if (!name) {
+    return showNotification('Введите название комнаты', 'error');
+  }
 
-function leaveRoom() {
-    if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-        localStream = null;
+  try {
+    const response = await fetch(`${API_URL}/rooms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getToken()}`
+      },
+      body: JSON.stringify({ name, type: 'public' })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      getEl('roomNameInput').value = '';
+      await loadRooms();
+      
+      if (data.invite_link) {
+        await copyToClipboard(data.invite_link);
+        showNotification(`Комната "${name}" создана! Код скопирован.`);
+      }
+    } else {
+      const errorData = await response.json();
+      showNotification(errorData.error || 'Ошибка создания комнаты', 'error');
     }
-    currentRoom = null;
-    isMicOn = false;
-    
-    getEl('chatContainer')?.classList.add('hidden');
-    getEl('noChatSelected')?.classList.remove('hidden');
-    
-    elements.roomsList.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
-    
-    showNotification('Вы вышли из комнаты');
+  } catch (error) {
+    showNotification('Ошибка сети', 'error');
+  }
 }
 
 async function joinByCode() {
-    const code = prompt("Введите код приглашения:");
-    if (!code) return;
+  const code = getEl('inviteCodeInput')?.value.trim();
+  if (!code) {
+    return showNotification('Введите код приглашения', 'error');
+  }
 
-    try {
-        const response = await fetch(`${API_URL}/invites/${code}`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
+  try {
+    const response = await fetch(`${API_URL}/invites/${code}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      showNotification('Вы успешно вошли в комнату!');
+      getEl('inviteCodeInput').value = '';
+      await loadRooms();
+      
+      if (data.room_id) {
+        // Get room details
+        const roomResponse = await fetch(`${API_URL}/rooms/${data.room_id}`, {
+          headers: { 'Authorization': `Bearer ${getToken()}` }
         });
-
-        if (response.ok) {
-            const data = await response.json(); // Предполагаем, что бэкенд вернет {room_id: "..."}
-            showNotification('Вы успешно вошли в комнату!');
-            
-            await loadRooms();
-            
-            if (data.room_id) {
-                joinRoom(data.room_id); 
-            }
-        } else {
-            showNotification('Неверный код или комната полна', 'error');
+        if (roomResponse.ok) {
+          const room = await roomResponse.json();
+          enterRoom(room.id, room.name, room.invite_link);
         }
-    } catch (err) {
-        showNotification('Ошибка сервера', 'error');
+      }
+    } else {
+      const errorData = await response.json();
+      showNotification(errorData.error || 'Неверный код или комната полна', 'error');
     }
+  } catch (err) {
+    showNotification('Ошибка сервера', 'error');
+  }
 }
 
-if (elements.toggleMicBtn) elements.toggleMicBtn.onclick = toggleMic;
-if (elements.leaveRoomBtn) elements.leaveRoomBtn.onclick = leaveRoom;
-if (elements.callBtn) {
-    elements.callBtn.onclick = startCall;
+async function enterRoom(roomId, roomName, inviteCode) {
+  try {
+    await fetch(`${API_URL}/rooms/${roomId}/join`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
+
+    currentRoom = roomId;
+    window.currentRoomInvite = inviteCode;
+    
+    // Update UI
+    getEl('chatRoomName').textContent = roomName;
+    getEl('chatRoomInfo').textContent = `Код: ${inviteCode}`;
+    
+    // Clear messages
+    const messagesList = getEl('messagesList');
+    if (messagesList) messagesList.innerHTML = '';
+    
+    // Load message history
+    await loadMessages(roomId);
+    
+    // Show chat screen
+    showScreen('chat');
+    
+    // Initialize call UI
+    updateCallUI();
+    
+    // Connect WebSocket
+    const token = getToken();
+    if (token && roomId) {
+      connectSocket(token, roomId);
+    }
+    
+    showNotification(`Вы вошли в комнату "${roomName}"`);
+  } catch (err) {
+    console.error("Ошибка входа в комнату", err);
+    showNotification('Ошибка входа в комнату', 'error');
+  }
 }
 
-async function sendMessage() {
-    const text = elements.messageInput?.value.trim();
-    if (!text || !currentRoom) return;
-
+async function leaveRoom() {
+  // Call backend API to leave the room
+  if (currentRoom) {
     try {
-        const response = await fetch(`${API_URL}/rooms/${currentRoom}/messages`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
-            // ИЗМЕНЕНО: Пробуем отправить 'content', так как многие API используют это имя поля
-            body: JSON.stringify({ content: text, text: text }) 
-        });
-
-        if (response.ok) {
-            const newMessage = await response.json();
-            elements.messageInput.value = '';
-            
-            // Добавляем сообщение на экран сразу
-            appendMessage({
-                user_id: localStorage.getItem(userIdKey),
-                content: text,
-                created_at: new Date().toISOString()
-            });
-        } else {
-            const errorData = await response.json();
-            console.error("Ошибка сервера:", errorData);
-            showNotification('Ошибка отправки: ' + (errorData.error || response.status), 'error');
-        }
+      await fetch(`${API_URL}/rooms/${currentRoom}/leave`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${getToken()}` }
+      });
     } catch (err) {
-        console.error("Ошибка сети:", err);
+      console.error("Error leaving room:", err);
+      // Continue with cleanup even if API call fails
     }
+  }
+
+  // Cleanup WebSocket and connections
+  cleanup();
+  currentRoom = null;
+  window.currentRoomInvite = null;
+  
+  // Hide call interface when leaving room
+  const callInterface = getEl('callInterface');
+  if (callInterface) {
+    callInterface.classList.add('hidden');
+  }
+  
+  showScreen('rooms');
+  showNotification('Вы вышли из комнаты');
 }
 
-function appendMessage(msg) {
-    if (!elements.messagesList) return;
+async function loadMessages(roomId) {
+  try {
+    const response = await fetch(`${API_URL}/rooms/${roomId}/messages`, {
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
     
-    const isMe = msg.user_id == localStorage.getItem(userIdKey);
-    const msgHtml = `
-        <div class="message ${isMe ? 'own' : ''}">
-            <div class="message-content">${msg.content || msg.text}</div>
-            <div class="message-time">${new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
-        </div>
-    `;
-    elements.messagesList.insertAdjacentHTML('beforeend', msgHtml);
-    
-    // Прокрутка вниз
-    elements.messagesList.scrollTop = elements.messagesList.scrollHeight;
+    if (response.ok) {
+      const messages = await response.json();
+      if (messages && Array.isArray(messages)) {
+        messages.forEach(msg => appendMessage(msg));
+      }
+    }
+  } catch (err) {
+    console.error("Не удалось загрузить историю чата", err);
+  }
 }
 
+// WebSocket connection
+let socketRetryCount = 0;
+const MAX_SOCKET_RETRIES = 5;
+const BASE_RETRY_DELAY = 3000;
 
-if (elements.sendMessageBtn) elements.sendMessageBtn.onclick = sendMessage;
+async function connectSocket(token, roomId) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${protocol}//${window.location.host}/ws/chat/${roomId}/?token=${token}&username=${encodeURIComponent(currentUser?.username || currentUser?.email || 'User')}`;
+  
+  socket = new WebSocket(url);
 
-elements.messageInput?.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') sendMessage();
-});
+  socket.onopen = () => {
+    console.log("Connected to WebSocket");
+    showNotification("Соединение установлено");
+    // Reset retry count on successful connection
+    socketRetryCount = 0;
+  };
 
-async function startCall() {
-    if (!currentRoom) return showNotification('Сначала войдите в комнату', 'error');
+  socket.onmessage = async (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      
+      switch (msg.type) {
+        case 'room_state':
+          handleRoomState(msg);
+          break;
 
-    peerConnection = new RTCPeerConnection(rtcConfig);
-    
-    // Получаем аудио/видео
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+        case 'user_joined':
+          handleUserJoined(msg);
+          break;
 
-    // Настраиваем локальное превью
-    const localVideo = getEl('local-video');
-    if (localVideo) localVideo.srcObject = localStream;
+        case 'user_left':
+          handleUserLeft(msg);
+          break;
 
-    peerConnection.ontrack = (event) => {
-        // Здесь мы добавляем видео собеседника
-        // В реальном приложении ID пользователя передается через WebSocket
-        addRemoteVideo(event.streams[0], 'remote-user', 'Собеседник');
-    };
+        case 'offer':
+          await handleOffer(msg);
+          break;
 
-    peerConnection.onicecandidate = (event) => {
-        if (event.candidate && socket?.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'candidate', room_id: currentRoom, data: event.candidate }));
+        case 'answer':
+          await handleAnswer(msg);
+          break;
+
+        case 'candidate':
+          await handleCandidate(msg);
+          break;
+
+        case 'chat_message':
+          appendMessage(msg);
+          break;
+      }
+    } catch (err) {
+      console.error("Error handling WebSocket message:", err);
+    }
+  };
+
+  socket.onclose = () => {
+    console.log("WebSocket connection closed");
+    showNotification("Соединение потеряно", "error");
+    // Attempt to reconnect with exponential backoff
+    if (socketRetryCount < MAX_SOCKET_RETRIES && currentRoom) {
+      socketRetryCount++;
+      const delay = BASE_RETRY_DELAY * Math.pow(2, socketRetryCount - 1);
+      console.log(`Attempting to reconnect in ${delay}ms (attempt ${socketRetryCount}/${MAX_SOCKET_RETRIES})`);
+      setTimeout(() => {
+        if (currentRoom) {
+          connectSocket(token, currentRoom);
         }
-    };
+      }, delay);
+    } else if (socketRetryCount >= MAX_SOCKET_RETRIES) {
+      showNotification("Не удалось восстановить соединение. Пожалуйста, обновите страницу.", "error");
+    }
+  };
 
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket.send(JSON.stringify({ type: 'offer', room_id: currentRoom, data: offer }));
+  socket.onerror = (error) => {
+    console.error("WebSocket error:", error);
+  };
+}
+
+function handleRoomState(msg) {
+  activeParticipants.clear();
+  const parts = msg.data?.participants || [];
+  parts.forEach(p => {
+    activeParticipants.set(p.id, { username: p.username, userId: p.userId });
+  });
+  updateParticipantList();
+}
+
+function handleUserJoined(msg) {
+  const userId = msg.data?.userId || msg.userId;
+  const username = msg.data?.username || msg.username;
+  const peerId = msg.from;
+  
+  if (peerId) {
+    activeParticipants.set(peerId, { username, userId });
+    updateParticipantList();
+    showNotification(`${username} присоединился к комнате`);
+  }
+}
+
+function handleUserLeft(msg) {
+  const peerId = msg.from;
+  if (peerId) {
+    activeParticipants.delete(peerId);
+    updateParticipantList();
+    removeRemoteVideo(peerId);
+    
+    // Close peer connection
+    const pc = peerConnections.get(peerId);
+    if (pc) {
+      pc.close();
+      peerConnections.delete(peerId);
+    }
+  }
 }
 
 function updateParticipantList() {
-    const list = document.getElementById('participant-list');
-    const count = document.getElementById('participant-count');
-    if (!list || !count) return;
+  const count = getEl('participantCount');
+  if (count) {
+    count.textContent = activeParticipants.size + 1; // +1 for local user
+  }
+}
+
+// WebRTC functions
+async function startCall() {
+  if (!currentRoom) {
+    return showNotification('Сначала войдите в комнату', 'error');
+  }
+
+  if (isCallActive) {
+    return showNotification('Звонок уже активен', 'error');
+  }
+
+  try {
+    // Get local media stream - audio only for voice calling
+    localStream = await navigator.mediaDevices.getUserMedia({ 
+      audio: true,
+      video: false
+    });
     
-    list.innerHTML = '<li id="list-local">Вы</li>';
+    // Update UI
+    isCallActive = true;
+    isMicOn = true;
+    isVideoOn = false; // Video is disabled for voice-only calls
+    updateCallUI();
     
-    activeParticipants.forEach((username, userId) => {
-        const li = document.createElement('li');
-        li.id = `list-user-${userId}`;
-        li.innerText = username;
-        list.appendChild(li);
+    // Create peer connections for all existing participants
+    activeParticipants.forEach((participant, peerId) => {
+      createPeerConnection(peerId);
+    });
+    
+    showNotification('Голосовой звонок начат');
+  } catch (err) {
+    console.error("Error starting call:", err);
+    showNotification('Не удалось начать звонок. Проверьте разрешения микрофона.', 'error');
+  }
+}
+
+function createPeerConnection(peerId) {
+  if (peerConnections.has(peerId)) {
+    return peerConnections.get(peerId);
+  }
+
+  const pc = new RTCPeerConnection(rtcConfig);
+  peerConnections.set(peerId, pc);
+
+  // Add local tracks
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      pc.addTrack(track, localStream);
+    });
+  }
+
+  // Handle incoming tracks
+  pc.ontrack = (event) => {
+    const participant = activeParticipants.get(peerId);
+    const username = participant?.username || 'Участник';
+    addRemoteVideo(event.streams[0], peerId, username);
+  };
+
+  // Handle ICE candidates
+  pc.onicecandidate = (event) => {
+    if (event.candidate && socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: 'candidate',
+        from: getUserId(),
+        to: peerId,
+        room_id: currentRoom,
+        data: event.candidate
+      }));
+    }
+  };
+
+  // Handle connection state changes
+  pc.onconnectionstatechange = () => {
+    console.log(`Peer connection state for ${peerId}:`, pc.connectionState);
+    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      removeRemoteVideo(peerId);
+    }
+  };
+
+  // Create and send offer
+  pc.createOffer()
+    .then(offer => pc.setLocalDescription(offer))
+    .then(() => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'offer',
+          from: getUserId(),
+          to: peerId,
+          room_id: currentRoom,
+          data: pc.localDescription
+        }));
+      }
+    })
+    .catch(err => {
+      console.error("Error creating offer:", err);
     });
 
-    count.innerText = activeParticipants.size + 1;
+  return pc;
 }
 
 async function handleOffer(msg) {
-    if (!peerConnection) {
-        peerConnection = new RTCPeerConnection(rtcConfig);
-        setupPeerListeners(msg.from); // msg.from — это ID приславшего оффер
-    }
+  const peerId = msg.from;
+  if (!peerId) return;
 
+  let pc = peerConnections.get(peerId);
+  if (!pc) {
+    pc = new RTCPeerConnection(rtcConfig);
+    peerConnections.set(peerId, pc);
+
+    // Add local tracks if available
     if (localStream) {
-        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
     }
 
-    peerConnection.ontrack = (event) => {
-        // Берем ID из сообщения офера
-        addRemoteVideo(event.streams[0], msg.userId || 'remote', 'Участник');
+    // Handle incoming tracks
+    pc.ontrack = (event) => {
+      const participant = activeParticipants.get(peerId);
+      const username = participant?.username || 'Участник';
+      addRemoteVideo(event.streams[0], peerId, username);
     };
 
-    peerConnection.onicecandidate = (event) => {
-        if (event.candidate && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                type: 'candidate',
-                room_id: currentRoom,
-                data: event.candidate
-            }));
-        }
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'candidate',
+          from: getUserId(),
+          to: peerId,
+          room_id: currentRoom,
+          data: event.candidate
+        }));
+      }
     };
 
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.data));
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
+    // Handle connection state changes
+    pc.onconnectionstatechange = () => {
+      console.log(`Peer connection state for ${peerId}:`, pc.connectionState);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        removeRemoteVideo(peerId);
+      }
+    };
+  }
 
-    socket.send(JSON.stringify({
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
         type: 'answer',
-	to: msg.from,
+        from: getUserId(),
+        to: peerId,
         room_id: currentRoom,
         data: answer
-    }));
-}
-
-function addRemoteVideo(stream, userId, username) {
-    if (document.getElementById(`wrapper-${userId}`)) return;
-    const grid = getEl('participantsGrid');
-    if (!grid) return;
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'video-wrapper';
-    wrapper.id = `wrapper-${userId}`;
-    wrapper.innerHTML = `
-        <video id="video-${userId}" autoplay playsinline></video>
-        <span class="user-label">${username}</span>
-    `;
-    grid.appendChild(wrapper);
-    const video = document.getElementById(`video-${userId}`);
-    if (video) video.srcObject = stream;
-}
-
-function removeRemoteVideo(userId) {
-    document.getElementById(`wrapper-${userId}`)?.remove();
-}
-
-// --- УДАЛЕН ОШИБОЧНЫЙ БЛОК peerConnection.ontrack ---
-
-async function init() {
-    const token = getToken();
-    if (!token) {
-        showScreen('auth');
-        return;
+      }));
     }
+  } catch (err) {
+    console.error("Error handling offer:", err);
+  }
+}
 
+async function handleAnswer(msg) {
+  const peerId = msg.from;
+  if (!peerId) return;
+
+  const pc = peerConnections.get(peerId);
+  if (pc) {
     try {
-        const response = await fetch(`${API_URL}/auth/me`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-
-        if (response.ok) {
-            currentUser = await response.json();
-            showScreen('app');
-            await loadRooms();
-        } else {
-            logout();
-        }
-    } catch (e) {
-        showScreen('auth');
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+    } catch (err) {
+      console.error("Error handling answer:", err);
     }
+  }
 }
 
-window.onload = init;
+async function handleCandidate(msg) {
+  const peerId = msg.from;
+  if (!peerId || !msg.data) return;
+
+  const pc = peerConnections.get(peerId);
+  if (pc) {
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(msg.data));
+    } catch (err) {
+      console.error("Error adding ICE candidate:", err);
+    }
+  }
+}
+
+function endCall() {
+  // Close all peer connections
+  peerConnections.forEach((pc, peerId) => {
+    pc.close();
+    removeRemoteVideo(peerId);
+  });
+  peerConnections.clear();
+
+  // Stop local stream
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  // Clear local video
+  const localVideo = getEl('local-video');
+  if (localVideo) {
+    localVideo.srcObject = null;
+  }
+
+  // Update state
+  isCallActive = false;
+  isMicOn = false;
+  isVideoOn = false;
+  updateCallUI();
+
+  showNotification('Звонок завершен');
+}
+
+function toggleMic() {
+  if (!localStream) return;
+  
+  const audioTrack = localStream.getAudioTracks()[0];
+  if (audioTrack) {
+    audioTrack.enabled = !audioTrack.enabled;
+    isMicOn = audioTrack.enabled;
+    updateCallUI();
+  }
+}
+
+function toggleVideo() {
+  if (!localStream) return;
+  
+  const videoTrack = localStream.getVideoTracks()[0];
+  if (videoTrack) {
+    videoTrack.enabled = !videoTrack.enabled;
+    isVideoOn = videoTrack.enabled;
+    updateCallUI();
+  }
+}
+
+function updateCallUI() {
+  const callInterface = getEl('callInterface');
+  const startCallBtn = getEl('startCallBtn');
+  const endCallBtn = getEl('endCallBtn');
+  const toggleMicBtn = getEl('toggleMicBtn');
+  const toggleVideoBtn = getEl('toggleVideoBtn');
+  const localStatus = getEl('localStatus');
+  const callStatus = getEl('callStatus');
+  const localParticipant = getEl('localParticipant');
+
+  // Call interface is always visible when in a room
+  // Update buttons based on call state
+  if (startCallBtn) {
+    startCallBtn.classList.toggle('hidden', isCallActive);
+  }
+  if (endCallBtn) {
+    endCallBtn.classList.toggle('hidden', !isCallActive);
+  }
+
+  // Update mic button - only show when call is active
+  if (toggleMicBtn) {
+    toggleMicBtn.classList.toggle('hidden', !isCallActive);
+    toggleMicBtn.classList.toggle('active', !isMicOn);
+  }
+
+  // Hide video button for voice-only calls
+  if (toggleVideoBtn) {
+    toggleVideoBtn.classList.add('hidden');
+  }
+
+  // Hide video elements for voice-only calls
+  if (localParticipant) {
+    const videoElement = localParticipant.querySelector('video');
+    const placeholder = localParticipant.querySelector('.no-video-placeholder');
+    if (videoElement) {
+      videoElement.classList.add('hidden');
+    }
+    if (placeholder) {
+      placeholder.classList.remove('hidden');
+    }
+  }
+
+  // Update status text
+  if (localStatus) {
+    localStatus.textContent = isMicOn ? 'Микрофон вкл.' : 'Микрофон выкл.';
+  }
+
+  if (callStatus) {
+    callStatus.textContent = isCallActive ? 'Голосовой звонок активен' : 'Готов к звонку';
+  }
+}
+
+function addRemoteVideo(stream, peerId, username) {
+  if (document.getElementById(`wrapper-${peerId}`)) return;
+  
+  const grid = getEl('participantsGrid');
+  if (!grid) return;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'participant-card';
+  wrapper.id = `wrapper-${peerId}`;
+  wrapper.innerHTML = `
+    <div class="participant-video">
+      <video id="video-${peerId}" autoplay playsinline class="hidden"></video>
+      <div class="no-video-placeholder">
+        <span>🎙️</span>
+        <p>Голосовой участник</p>
+      </div>
+    </div>
+    <div class="participant-info">
+      <span class="participant-name">${username}</span>
+    </div>
+  `;
+  grid.appendChild(wrapper);
+  
+  const video = document.getElementById(`video-${peerId}`);
+  if (video) {
+    video.srcObject = stream;
+  }
+}
+
+function removeRemoteVideo(peerId) {
+  document.getElementById(`wrapper-${peerId}`)?.remove();
+}
+
+// Chat functions
+async function sendMessage() {
+  const text = getEl('messageInput')?.value.trim();
+  if (!text || !currentRoom) return;
+
+  try {
+    const response = await fetch(`${API_URL}/rooms/${currentRoom}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getToken()}`
+      },
+      body: JSON.stringify({ content: text })
+    });
+
+    if (response.ok) {
+      getEl('messageInput').value = '';
+      
+      // Add message to UI immediately
+      appendMessage({
+        user_id: getUserId(),
+        content: text,
+        created_at: new Date().toISOString()
+      });
+    } else {
+      const errorData = await response.json();
+      showNotification('Ошибка отправки: ' + (errorData.error || response.status), 'error');
+    }
+  } catch (err) {
+    console.error("Ошибка сети:", err);
+    showNotification('Ошибка сети', 'error');
+  }
+}
+
+function appendMessage(msg) {
+  const messagesList = getEl('messagesList');
+  if (!messagesList) return;
+  
+  const isMe = msg.user_id === getUserId();
+  const msgHtml = `
+    <li class="message ${isMe ? 'own' : ''}">
+      <div class="message-content">${msg.content || msg.text}</div>
+      <div class="message-time">${new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+    </li>
+  `;
+  messagesList.insertAdjacentHTML('beforeend', msgHtml);
+  
+  // Scroll to bottom
+  messagesList.scrollTop = messagesList.scrollHeight;
+}
+
+// Utility functions
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showNotification('Скопировано в буфер обмена');
+  } catch (err) {
+    showNotification('Не удалось скопировать', 'error');
+  }
+}
+
+function cleanup() {
+  // Close WebSocket
+  if (socket) {
+    // Remove onclose handler to prevent reconnection
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.close();
+    socket = null;
+  }
+
+  // Reset retry count
+  socketRetryCount = 0;
+
+  // End call
+  if (isCallActive) {
+    endCall();
+  }
+
+  // Clear peer connections
+  peerConnections.forEach((pc, peerId) => {
+    pc.close();
+    removeRemoteVideo(peerId);
+  });
+  peerConnections.clear();
+
+  // Clear participants
+  activeParticipants.clear();
+
+  // Clear local stream
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  // Reset participant count
+  const count = getEl('participantCount');
+  if (count) {
+    count.textContent = '0';
+  }
+
+  // Reset call state
+  isCallActive = false;
+  isMicOn = false;
+  isVideoOn = false;
+}
+
+// Initialization
+async function init() {
+  const token = getToken();
+  if (!token) {
+    showScreen('auth');
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/auth/me`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (response.ok) {
+      currentUser = await response.json();
+      showScreen('rooms');
+      await loadRooms();
+      updateUserInfo();
+    } else {
+      logout();
+    }
+  } catch (e) {
+    console.error("Init error:", e);
+    showScreen('auth');
+  }
+}
+
+// Event listeners
+document.addEventListener('DOMContentLoaded', () => {
+  // Auth
+  getEl('loginBtn')?.addEventListener('click', login);
+  getEl('registerBtn')?.addEventListener('click', register);
+  getEl('switchToRegister')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    getEl('loginForm')?.classList.add('hidden');
+    getEl('registerForm')?.classList.remove('hidden');
+  });
+  getEl('switchToLogin')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    getEl('registerForm')?.classList.add('hidden');
+    getEl('loginForm')?.classList.remove('hidden');
+  });
+
+  // Rooms
+  getEl('createRoomBtn')?.addEventListener('click', createRoom);
+  getEl('joinByInviteBtn')?.addEventListener('click', joinByCode);
+  getEl('refreshRoomsBtn')?.addEventListener('click', loadRooms);
+  getEl('logoutBtn')?.addEventListener('click', logout);
+
+  // Chat
+  getEl('backToRoomsBtn')?.addEventListener('click', leaveRoom);
+  getEl('leaveRoomBtn')?.addEventListener('click', leaveRoom);
+  getEl('copyInviteBtn')?.addEventListener('click', () => {
+    if (window.currentRoomInvite) {
+      copyToClipboard(window.currentRoomInvite);
+    } else {
+      showNotification('Нет кода приглашения', 'error');
+    }
+  });
+
+  // Call
+  getEl('startCallBtn')?.addEventListener('click', startCall);
+  getEl('endCallBtn')?.addEventListener('click', endCall);
+  getEl('toggleMicBtn')?.addEventListener('click', toggleMic);
+
+  // Messages
+  getEl('sendMessageBtn')?.addEventListener('click', sendMessage);
+  getEl('messageInput')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  // Incoming call modal
+  getEl('acceptCallBtn')?.addEventListener('click', async () => {
+    getEl('incomingCallModal')?.classList.add('hidden');
+    // Start the call when accepting
+    if (!isCallActive && currentRoom) {
+      await startCall();
+    }
+  });
+  getEl('rejectCallBtn')?.addEventListener('click', () => {
+    getEl('incomingCallModal')?.classList.add('hidden');
+    showNotification('Вызов отклонен');
+  });
+
+  // Initialize app
+  init();
+});
