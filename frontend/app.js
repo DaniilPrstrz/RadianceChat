@@ -373,6 +373,9 @@ async function enterRoom(roomId, roomName, inviteCode) {
       connectSocket(token, roomId);
     }
     
+    // Automatically start the call when entering the room
+    await startCall();
+    
     showNotification(`Вы вошли в комнату "${roomName}"`);
   } catch (err) {
     console.error("Ошибка входа в комнату", err);
@@ -553,7 +556,7 @@ async function startCall() {
   }
 
   if (isCallActive) {
-    return showNotification('Звонок уже активен', 'error');
+    return; // Call is already active, no need to start again
   }
 
   try {
@@ -764,12 +767,14 @@ function endCall() {
   updateCallUI();
 
   showNotification('Звонок завершен');
+  
+  // Leave the room after ending the call
+  leaveRoom();
 }
 
 function toggleMic() {
   if (!localStream) {
-    showNotification('Сначала начните звонок', 'error');
-    return;
+    return; // No stream available, nothing to toggle
   }
   
   const audioTrack = localStream.getAudioTracks()[0];
@@ -794,7 +799,6 @@ function toggleVideo() {
 
 function updateCallUI() {
   const callInterface = getEl('callInterface');
-  const startCallBtn = getEl('startCallBtn');
   const endCallBtn = getEl('endCallBtn');
   const toggleMicBtn = getEl('toggleMicBtn');
   const toggleVideoBtn = getEl('toggleVideoBtn');
@@ -807,19 +811,15 @@ function updateCallUI() {
     callInterface.classList.toggle('hidden', !currentRoom);
   }
   
-  // Update buttons based on call state
-  if (startCallBtn) {
-    startCallBtn.classList.toggle('hidden', isCallActive);
-  }
+  // End call button is always visible when in a room (call is always active)
   if (endCallBtn) {
-    endCallBtn.classList.toggle('hidden', !isCallActive);
+    endCallBtn.classList.toggle('hidden', !currentRoom);
   }
 
-  // Update mic button - show when in room, but only active during call
+  // Update mic button - show when in room
   if (toggleMicBtn) {
-    // Always show mic button when in a room (currentRoom is set)
     toggleMicBtn.classList.toggle('hidden', !currentRoom);
-    // Only show as active (red/disabled) when mic is off during call
+    // Show as active (red/disabled) when mic is off
     toggleMicBtn.classList.toggle('active', isCallActive && !isMicOn);
   }
 
@@ -957,11 +957,6 @@ function cleanup() {
   // Reset retry count
   socketRetryCount = 0;
 
-  // End call
-  if (isCallActive) {
-    endCall();
-  }
-
   // Clear peer connections
   peerConnections.forEach((pc, peerId) => {
     pc.close();
@@ -1041,7 +1036,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Chat
   getEl('backToRoomsBtn')?.addEventListener('click', leaveRoom);
-  getEl('leaveRoomBtn')?.addEventListener('click', leaveRoom);
   getEl('copyInviteBtn')?.addEventListener('click', () => {
     if (window.currentRoomInvite) {
       copyToClipboard(window.currentRoomInvite);
@@ -1051,7 +1045,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Call
-  getEl('startCallBtn')?.addEventListener('click', startCall);
   getEl('endCallBtn')?.addEventListener('click', endCall);
   getEl('toggleMicBtn')?.addEventListener('click', toggleMic);
 
@@ -1061,13 +1054,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') sendMessage();
   });
 
-  // Incoming call modal
-  getEl('acceptCallBtn')?.addEventListener('click', async () => {
+  // Incoming call modal (no longer needed with automatic call starting)
+  getEl('acceptCallBtn')?.addEventListener('click', () => {
     getEl('incomingCallModal')?.classList.add('hidden');
-    // Start the call when accepting
-    if (!isCallActive && currentRoom) {
-      await startCall();
-    }
   });
   getEl('rejectCallBtn')?.addEventListener('click', () => {
     getEl('incomingCallModal')?.classList.add('hidden');
