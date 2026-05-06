@@ -274,6 +274,12 @@ body {
   font-size: 0.85rem;
 }
 
+.room-card-actions .btn-icon {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding: 8px;
+}
+
 /* Chat Screen */
 .chat-layout {
   display: flex;

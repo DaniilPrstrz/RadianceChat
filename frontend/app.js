@@ -174,7 +174,7 @@ async function loadRooms() {
       if (roomCount) roomCount.textContent = `${rooms.length} комнат`;
 
       roomsList.innerHTML = rooms.map(room => `
-        <div class="room-card" data-id="${room.id}" data-invite="${room.invite_link || ''}" data-name="${room.name}">
+        <div class="room-card" data-id="${room.id}" data-invite="${room.invite_link || ''}" data-name="${room.name}" data-host="${room.host_id}">
           <div class="room-card-header">
             <div class="room-card-title">${room.name}</div>
             <div class="room-card-code">${room.invite_link}</div>
@@ -185,6 +185,7 @@ async function loadRooms() {
           <div class="room-card-actions">
             <button class="btn-primary join-room-btn">Войти</button>
             <button class="btn-secondary copy-code-btn">Копировать код</button>
+            <button class="btn-icon btn-danger delete-room-btn" title="Удалить комнату">🗑️</button>
           </div>
         </div>
       `).join('');
@@ -193,6 +194,7 @@ async function loadRooms() {
       roomsList.querySelectorAll('.room-card').forEach(card => {
         const joinBtn = card.querySelector('.join-room-btn');
         const copyBtn = card.querySelector('.copy-code-btn');
+        const deleteBtn = card.querySelector('.delete-room-btn');
         
         joinBtn?.addEventListener('click', () => {
           const roomId = card.getAttribute('data-id');
@@ -203,6 +205,14 @@ async function loadRooms() {
           e.stopPropagation();
           const code = card.getAttribute('data-invite');
           copyToClipboard(code);
+        });
+
+        deleteBtn?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const roomId = card.getAttribute('data-id');
+          const roomName = card.getAttribute('data-name');
+          const hostId = card.getAttribute('data-host');
+          showDeleteRoomModal(roomId, roomName, hostId);
         });
       });
     }
@@ -281,6 +291,53 @@ async function joinByCode() {
   } catch (err) {
     showNotification('Ошибка сервера', 'error');
   }
+}
+
+// Room deletion functions
+let roomToDelete = null;
+
+function showDeleteRoomModal(roomId, roomName, hostId) {
+  // Check if current user is the host
+  if (hostId !== getUserId()) {
+    showNotification('Только создатель комнаты может её удалить', 'error');
+    return;
+  }
+
+  roomToDelete = roomId;
+  const deleteRoomInfo = getEl('deleteRoomInfo');
+  if (deleteRoomInfo) {
+    deleteRoomInfo.textContent = `Вы уверены, что хотите удалить комнату "${roomName}"? Это действие нельзя отменить.`;
+  }
+  getEl('deleteRoomModal')?.classList.remove('hidden');
+}
+
+async function deleteRoom() {
+  if (!roomToDelete) return;
+
+  try {
+    const response = await fetch(`${API_URL}/rooms/${roomToDelete}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    });
+
+    if (response.ok) {
+      showNotification('Комната успешно удалена');
+      getEl('deleteRoomModal')?.classList.add('hidden');
+      roomToDelete = null;
+      await loadRooms();
+    } else {
+      const errorData = await response.json();
+      showNotification(errorData.error || 'Ошибка удаления комнаты', 'error');
+    }
+  } catch (err) {
+    console.error("Error deleting room:", err);
+    showNotification('Ошибка сети', 'error');
+  }
+}
+
+function cancelDeleteRoom() {
+  getEl('deleteRoomModal')?.classList.add('hidden');
+  roomToDelete = null;
 }
 
 async function enterRoom(roomId, roomName, inviteCode) {
@@ -1016,6 +1073,10 @@ document.addEventListener('DOMContentLoaded', () => {
     getEl('incomingCallModal')?.classList.add('hidden');
     showNotification('Вызов отклонен');
   });
+
+  // Delete room modal
+  getEl('confirmDeleteBtn')?.addEventListener('click', deleteRoom);
+  getEl('cancelDeleteBtn')?.addEventListener('click', cancelDeleteRoom);
 
   // Initialize app
   init();
