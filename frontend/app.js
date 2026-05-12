@@ -862,6 +862,116 @@ function showCallEndedState(reason = 'Звонок завершен') {
   }, 3000);
 }
 
+function handleForceMute() {
+  const audioTrack = localStream?.getAudioTracks()[0];
+  if (audioTrack) {
+    audioTrack.enabled = false;
+  }
+  isMicOn = false;
+  updateCallUI();
+  showNotification('Организатор отключил ваш микрофон', 'error');
+}
+
+function handleParticipantRemoved(msg) {
+  showNotification(msg.data?.reason || 'Организатор удалил вас из комнаты', 'error');
+  leaveRoom();
+}
+
+function handleCallEndedForAll(msg) {
+  const reason = msg.data?.reason || 'Организатор завершил звонок для всех';
+  showCallEndedState(reason);
+}
+
+function showCallEndedState(reason = 'Звонок завершен') {
+  if (callEndRedirectTimer) {
+    clearTimeout(callEndRedirectTimer);
+  }
+
+  if (socket) {
+    socket.onclose = null;
+    socket.onerror = null;
+  }
+  socketRetryCount = 0;
+
+  peerConnections.forEach((pc) => pc.close());
+  peerConnections.clear();
+
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  if (videoStream) {
+    videoStream.getTracks().forEach(track => track.stop());
+    videoStream = null;
+  }
+
+  isCallActive = false;
+  isMicOn = false;
+  isVideoOn = false;
+
+  const callInterface = getEl('callInterface');
+  const callStatus = getEl('callStatus');
+  const participantsHint = getEl('participantsPanelHint');
+  const endForAllBtn = getEl('endCallForAllBtn');
+
+  callInterface?.classList.add('call-ended');
+  if (callStatus) callStatus.textContent = 'Звонок завершен';
+  if (participantsHint) participantsHint.textContent = 'Звонок завершен';
+  if (endForAllBtn) endForAllBtn.classList.add('hidden');
+
+  [getEl('toggleMicBtn'), getEl('toggleVideoBtn'), getEl('endCallBtn'), endForAllBtn].forEach((button) => {
+    if (button) button.disabled = true;
+  });
+
+  document.querySelectorAll('.participant-card').forEach((card) => {
+    const video = card.querySelector('video');
+    const placeholder = card.querySelector('.no-video-placeholder');
+    const placeholderIcon = placeholder?.querySelector('span');
+    const placeholderText = placeholder?.querySelector('p');
+    const status = card.querySelector('.participant-status');
+
+    if (video) {
+      video.srcObject = null;
+      video.classList.add('hidden');
+    }
+    if (placeholder) placeholder.classList.remove('hidden');
+    if (placeholderIcon) placeholderIcon.textContent = '✅';
+    if (placeholderText) placeholderText.textContent = 'Звонок завершен';
+    if (status) status.textContent = 'Звонок завершен';
+  });
+
+  showNotification(reason, 'error');
+
+  callEndRedirectTimer = setTimeout(() => {
+    leaveRoom({
+      skipApi: true,
+      notification: 'Звонок завершен',
+      reloadRooms: true
+    });
+  }, 3000);
+}
+
+function handleForceMute() {
+  const audioTrack = localStream?.getAudioTracks()[0];
+  if (audioTrack) {
+    audioTrack.enabled = false;
+  }
+  isMicOn = false;
+  updateCallUI();
+  showNotification('Организатор отключил ваш микрофон', 'error');
+}
+
+function handleParticipantRemoved(msg) {
+  showNotification(msg.data?.reason || 'Организатор удалил вас из комнаты', 'error');
+  leaveRoom();
+}
+
+function handleCallEndedForAll(msg) {
+  showNotification(msg.data?.reason || 'Организатор завершил звонок для всех', 'error');
+  leaveRoom();
+}
+
 // WebRTC functions
 async function startCall() {
   if (!currentRoom) {
