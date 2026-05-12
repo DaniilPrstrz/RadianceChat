@@ -1130,3 +1130,22 @@ body {
     border-top: 1px solid var(--border);
   }
 }
+
+.call-interface.call-ended {
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.call-interface.call-ended .call-status {
+  color: var(--success);
+}
+
+.call-interface.call-ended .no-video-placeholder {
+  background: linear-gradient(135deg, #064e3b 0%, #0f766e 100%);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none !important;
+  box-shadow: none !important;
+}
