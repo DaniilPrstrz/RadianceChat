@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// RoomStore defines interface for room persistence
 type RoomStore interface {
 	CreateRoomWithHost(room models.Room, participantID string) error
 	FindRoomByID(roomID string) (models.Room, error)
@@ -28,7 +27,6 @@ type RoomStore interface {
 	EndRoomAndLeaveParticipants(roomID string) error
 }
 
-// SQLRoomStore implements RoomStore using PostgreSQL
 type SQLRoomStore struct {
 	db *sql.DB
 }
@@ -186,7 +184,6 @@ func (s *SQLRoomStore) EndRoomAndLeaveParticipants(roomID string) error {
 	return tx.Commit()
 }
 
-// RoomHandler is the HTTP handler for room operations
 type RoomHandler struct {
 	rooms RoomStore
 }
@@ -373,7 +370,7 @@ func (h *RoomHandler) JoinByInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Database error")
-	 return
+		return
 	}
 	r.SetPathValue("id", roomID)
 	h.JoinRoom(w, r)
