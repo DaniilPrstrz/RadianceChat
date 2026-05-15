@@ -70,7 +70,7 @@ func (s *SQLRoomStore) FindRoomByID(roomID string) (models.Room, error) {
 	return room, err
 }
 
-// ListActiveRoomsForUser returns rooms with is_host flag computed based on userID
+// ListActiveRoomsForUser возвращает комнаты с флагом is_host, вычисленным на основе userID
 func (s *SQLRoomStore) ListActiveRoomsForUser(userID string) ([]models.Room, error) {
 	rows, err := s.db.Query(
 		`SELECT r.id, r.name, r.type, r.host_id, r.invite_link, r.created_at, r.status,
